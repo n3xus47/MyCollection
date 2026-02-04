@@ -1,0 +1,48 @@
+1. Filtrowanie przekierowań (Redirects)
+
+W obecnej formie get_all_pages pobiera wszystko – w tym przekierowania. Jeśli strona „Twin Mill” przekierowuje do „Twin Mill (casting)”, Twój skrypt przetworzy obie, tworząc duplikaty lub pobierając puste dane.
+
+    Poprawka: W parametrach params w funkcji get_all_pages() dodaj: "apfilterredir": "nonredirects"
+
+2. Obsługa Lazy Loading dla zdjęć
+
+Fandom nie ładuje wszystkich obrazków od razu. W surowym kodzie HTML zamiast atrybutu src często znajdziesz data-src. Twój obecny regex w extract_versions_table może zwracać puste linki lub miniatury placeholderów.
+
+    Poprawka: Zmień regex wyszukujący zdjęcie, aby najpierw sprawdzał data-src: re.search(r'(?:data-src|src)=["\']([^"\']+)["\']', cell_html)
+
+3. Nagłówek User-Agent (Bezpieczeństwo)
+
+Domyślny nagłówek biblioteki requests jest często blokowany przez Fandom jako potencjalny atak Botnetu.
+
+    Poprawka: Dodaj stałą HEADERS i używaj jej w każdym zapytaniu:
+    Python
+
+    HEADERS = {"User-Agent": "HotWheelsDataCollector/1.0 (twoj@email.com)"}
+    # W requests:
+    requests.get(BASE_URL, params=params, headers=HEADERS, timeout=60)
+
+4. Problem z colspan w tabelach
+
+To najtrudniejszy punkt. Na Wiki często zdarza się, że jeden numer zabawki (Toy #) ma przypisane dwa wiersze (np. dwa rodzaje kół). Wtedy w HTML-u pojawia się rowspan lub colspan. Twój obecny re.findall po prostu zliczy komórki w wierszu – jeśli jedna jest połączona, cały wiersz "rozjedzie się" i dane trafią do złych kolumn (np. kolor wyląduje w polu roku).
+
+    Poprawka: To wymagałoby użycia BeautifulSoup zamiast Regex, aby poprawnie interpretować strukturę tabeli.
+
+5. Czyszczenie wartości (Cleaning)
+
+Wiele wartości w tabelach zawiera przypisy, np. 2024 [1]. Twój skrypt powinien usuwać te nawiasy kwadratowe, bo inaczej będziesz miał "brudne" lata i numery w JSON-ie.
+
+    Poprawka: Dodaj w _cell_text usuwanie przypisów: text = re.sub(r'\[\d+\]', '', text)
+
+Podsumowanie struktury danych po poprawkach
+6. Optymalizacja połączeń (Session)
+
+Obecnie każde zapytanie requests.get otwiera nowe połączenie TCP. Przy 20 000 stron to ogromny narzut czasowy.
+
+    Poprawka: Użyj requests.Session(). To pozwoli na reużywanie tego samego połączenia (keep-alive), co przyspieszy pobieranie o około 30-50%.
+
+Python
+
+# Przykład użycia sesji:
+session = requests.Session()
+session.headers.update(HEADERS)
+# Potem zamiast requests.get(...) używasz session.get(...)

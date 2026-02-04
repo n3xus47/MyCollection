@@ -23,8 +23,6 @@ class CarBase(SQLModel):
     id: Optional[UUID] = Field(default_factory=uuid4, primary_key=True)
     model_name: str = Field(index=True)
     page_title: Optional[str] = None
-    brand: str = Field(default="Hot Wheels")
-
 
 class Car(CarBase, table=True):
     """Model samochodu (casting) - grupuje warianty po model_name/page_title."""
@@ -39,7 +37,7 @@ class Variant(SQLModel, table=True):
     
     id: Optional[UUID] = Field(default_factory=uuid4, primary_key=True)
     car_id: UUID = Field(foreign_key="cars.id")
-    toy_number: str = Field(index=True)  # Główny identyfikator (może się powtarzać)
+    toy_number: str = Field(index=True)
     desc: str
     is_chase: bool = Field(default=False)
     
@@ -50,8 +48,8 @@ class Variant(SQLModel, table=True):
     # Cechy wariantu do dopasowania
     release_year: Optional[int] = None
     series_name: Optional[str] = None
-    series_position: Optional[int] = None  # Numer auta w serii (np. 1, 2, 10)
-    series_total: Optional[int] = None  # Całkowita liczba aut w serii (np. 10)
+    series_position: Optional[int] = None
+    series_total: Optional[int] = None
     body_color: Optional[str] = None
     tampo: Optional[str] = None
     wheel_type: Optional[str] = None
@@ -86,8 +84,8 @@ class VariantBase(SQLModel):
     super_treasure_hunt: bool
     release_year: Optional[int] = None
     series_name: Optional[str] = None
-    series_position: Optional[int] = None  # Numer auta w serii (np. 1, 2, 10)
-    series_total: Optional[int] = None  # Całkowita liczba aut w serii (np. 10)
+    series_position: Optional[int] = None
+    series_total: Optional[int] = None
     body_color: Optional[str] = None
     tampo: Optional[str] = None
     wheel_type: Optional[str] = None
@@ -127,6 +125,7 @@ class CollectionItemSchema(SQLModel):
 class GeminiOCRResponse(SQLModel):
     """Response z OCR Gemini."""
     toy_number: Optional[str] = None
+    model_name: Optional[str] = None
     release_year: Optional[int] = None
     series_name: Optional[str] = None
     body_color: Optional[str] = None

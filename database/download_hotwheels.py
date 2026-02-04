@@ -16,8 +16,8 @@ from pathlib import Path
 BASE_URL = "https://hotwheels.fandom.com/api.php"
 
 # Output file - new file for fresh download, old file stays as backup
-OUTPUT_FILE = Path(__file__).parent / "hotwheels_models.json"
-OUTPUT_FILE_NEW = Path(__file__).parent / "hotwheels_models_new.json"
+OUTPUT_FILE = Path(__file__).parent / "hotwheels_models_new1.json"
+OUTPUT_FILE_NEW = Path(__file__).parent / "hotwheels_models_new2.json"
 
 def get_wiki_statistics() -> Dict[str, int]:
     """Get wiki statistics to verify we got all pages."""
@@ -65,6 +65,7 @@ def get_all_pages() -> List[str]:
         "list": "allpages",
         "aplimit": "max",  # 500 pages per request (maximum allowed)
         "apnamespace": "0",  # Main namespace only (excludes talk pages, categories, etc.)
+        "apfilterredir": "nonredirects",
     }
     
     while True:
@@ -173,7 +174,8 @@ def get_page_content(title: str) -> Optional[Dict[str, Any]]:
         "format": "json",
         "page": title,
         "prop": "wikitext|text",
-        "disabletoc": "1"
+        "disabletoc": "1",
+        "redirects": "1"
     }
     
     try:
@@ -360,6 +362,57 @@ def clean_wikitext_value(value: str) -> str:
     return value.strip()
 
 
+def _strip_html(text: str) -> str:
+    text = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = html.unescape(text)
+    return ' '.join(text.split()).strip()
+
+
+def extract_description(html_text: str) -> Optional[str]:
+    """
+    Extract description text from the page.
+    Use the first contiguous paragraphs before the first heading.
+    """
+    # Prefer content area to avoid nav/infobox noise
+    content_match = re.search(
+        r'<div[^>]*class="[^"]*mw-parser-output[^"]*"[^>]*>(.*?)</div>',
+        html_text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    content_html = content_match.group(1) if content_match else html_text
+
+    # Walk through paragraphs and headings in order
+    tag_pattern = r'<(p|h2|h3|h4)[^>]*>(.*?)</\1>'
+    description_parts = []
+    for match in re.finditer(tag_pattern, content_html, re.IGNORECASE | re.DOTALL):
+        tag = match.group(1).lower()
+        inner = match.group(2)
+        if tag != "p":
+            # Stop at first heading once we collected any description
+            if description_parts:
+                break
+            continue
+
+        text = _strip_html(inner)
+        # Skip if too short or contains only links/images
+        if len(text) <= 50 or re.match(r'^\[.*\]$', text):
+            continue
+
+        description_parts.append(text)
+
+    if description_parts:
+        return "\n\n".join(description_parts)
+
+    return None
+
+
+def _cell_text(cell_html: str, br_separator: str = " ") -> str:
+    # Preserve line breaks for better splitting in base/notes columns
+    cell_html = re.sub(r'<br\s*/?>', br_separator, cell_html, flags=re.IGNORECASE)
+    return _strip_html(cell_html)
+
+
 def extract_versions_table(html_text: str) -> List[Dict[str, Any]]:
     """
     Extract all versions/variants from the Versions table on the wiki page.
@@ -376,32 +429,47 @@ def extract_versions_table(html_text: str) -> List[Dict[str, Any]]:
     
     table_html = None
     for table in all_tables:
-        # Check if this table has "Toy #" or "Toy&nbsp;#" in header row
-        header_match = re.search(r'<tr[^>]*>(.*?)</tr>', table, re.IGNORECASE | re.DOTALL)
-        if header_match:
+        # Look for any row that contains "Toy #" in header or data cells
+        for header_match in re.finditer(r'<tr[^>]*>(.*?)</tr>', table, re.IGNORECASE | re.DOTALL):
             header = header_match.group(1)
-            # Check for Toy # in various formats
-            if re.search(r'Toy\s*#|Toy&nbsp;#', header, re.IGNORECASE):
+            if re.search(r'Toy\s*#|Toy&nbsp;#|Toy\s*No\.?|Model\s*#|Sku', header, re.IGNORECASE):
                 table_html = table
                 break
+        if table_html:
+            break
     
     if not table_html:
         return versions
     
-    # Extract table rows (skip header row)
+    # Extract table rows
     row_pattern = r'<tr[^>]*>(.*?)</tr>'
     rows = re.findall(row_pattern, table_html, re.IGNORECASE | re.DOTALL)
     
     if len(rows) < 2:  # Need at least header + 1 data row
         return versions
-    
-    # Extract header to know column positions
-    header_row = rows[0]
-    header_cells = re.findall(r'<th[^>]*>(.*?)</th>', header_row, re.IGNORECASE | re.DOTALL)
+
+    # Find header row (first row containing "Toy #")
+    header_row_index = 0
+    for i, row in enumerate(rows):
+        if re.search(r'Toy\s*#|Toy&nbsp;#|Toy\s*No\.?|Model\s*#|Sku', row, re.IGNORECASE):
+            header_row_index = i
+            break
+
+    header_row = rows[header_row_index]
+    header_cells = re.findall(r'<t[hd][^>]*>(.*?)</t[hd]>', header_row, re.IGNORECASE | re.DOTALL)
     headers = []
     for cell in header_cells:
-        header_text = re.sub(r'<[^>]+>', '', cell).strip()
+        header_text = _cell_text(cell, br_separator=" ")
         headers.append(header_text.lower())
+
+    def normalize_header(text: str) -> str:
+        text = text.lower()
+        text = text.replace("&nbsp;", " ")
+        text = re.sub(r'[\s/]+', ' ', text)
+        text = re.sub(r'[^a-z0-9# ]+', '', text)
+        return text.strip()
+
+    normalized_headers = [normalize_header(h) for h in headers]
     
     # Find column indices for important fields
     toy_num_idx = None
@@ -413,39 +481,51 @@ def extract_versions_table(html_text: str) -> List[Dict[str, Any]]:
     base_idx = None
     window_idx = None
     interior_idx = None
+    col_idx = None
+    country_idx = None
+    notes_idx = None
+    photo_idx = None
     
-    for i, header in enumerate(headers):
-        if 'toy' in header or '#' in header:
+    for i, header in enumerate(normalized_headers):
+        # Check more specific headers first to avoid false matches
+        if 'interior' in header:
+            interior_idx = i
+        elif 'window' in header:
+            window_idx = i
+        elif 'base' in header and 'code' not in header:
+            base_idx = i
+        elif ('col' in header and '#' in header) or 'collector' in header:
+            col_idx = i
+        elif 'country' in header:
+            country_idx = i
+        elif 'notes' in header:
+            notes_idx = i
+        elif 'photo' in header:
+            photo_idx = i
+        elif 'toy' in header or ('#' in header and 'col' not in header):
             toy_num_idx = i
         elif 'year' in header:
             year_idx = i
         elif 'series' in header:
             series_idx = i
-        elif 'color' in header and 'base' not in header:
+        elif 'color' in header and 'base' not in header and 'window' not in header and 'interior' not in header:
             color_idx = i
         elif 'tampo' in header:
             tampo_idx = i
         elif 'wheel' in header:
             wheel_idx = i
-        elif 'base' in header:
-            base_idx = i
-        elif 'window' in header:
-            window_idx = i
-        elif 'interior' in header:
-            interior_idx = i
     
     # Extract data rows
-    for row in rows[1:]:  # Skip header
-        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
-        if len(cells) < len(headers):
+    for row in rows[header_row_index + 1:]:  # Skip header
+        cells = re.findall(r'<t[hd][^>]*>(.*?)</t[hd]>', row, re.IGNORECASE | re.DOTALL)
+        if not cells:
             continue
         
         version = {}
         
         # Extract toy number (most important)
         if toy_num_idx is not None and toy_num_idx < len(cells):
-            toy_num = re.sub(r'<[^>]+>', '', cells[toy_num_idx]).strip()
-            toy_num = html.unescape(toy_num)
+            toy_num = _cell_text(cells[toy_num_idx], br_separator=" ")
             if toy_num and toy_num != '-':
                 version['toy_number'] = toy_num.upper().replace(' ', '')
             else:
@@ -455,43 +535,115 @@ def extract_versions_table(html_text: str) -> List[Dict[str, Any]]:
         
         # Extract other fields
         if year_idx is not None and year_idx < len(cells):
-            year = re.sub(r'<[^>]+>', '', cells[year_idx]).strip()
-            version['year'] = html.unescape(year)
+            year = _cell_text(cells[year_idx], br_separator=" ")
+            version['year'] = year
         
         if series_idx is not None and series_idx < len(cells):
-            series = re.sub(r'<[^>]+>', '', cells[series_idx]).strip()
-            series = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', series)
-            version['series'] = html.unescape(series)
+            series = _cell_text(cells[series_idx], br_separator=" ")
+            
+            # Extract series_position and series_total from series_name (format: "Series Name5/5" or "Series Name 5/5")
+            series_position = None
+            series_total = None
+            series_cleaned = series
+            
+            # Try to find pattern like "5/5" or " 5/5" at the end
+            series_number_match = re.search(r'(\d+)/(\d+)\s*$', series)
+            if series_number_match:
+                try:
+                    series_position = int(series_number_match.group(1))
+                    series_total = int(series_number_match.group(2))
+                    # Remove the number from series name
+                    series_cleaned = re.sub(r'\d+/\d+\s*$', '', series).strip()
+                except (ValueError, IndexError):
+                    pass
+            
+            version['series'] = series_cleaned
+            version['series_position'] = series_position
+            version['series_total'] = series_total
         
         if color_idx is not None and color_idx < len(cells):
-            color = re.sub(r'<[^>]+>', '', cells[color_idx]).strip()
-            color = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', color)
-            version['body_color'] = html.unescape(color)
+            color = _cell_text(cells[color_idx], br_separator=" ")
+            version['body_color'] = color if color and color != '-' else None
         
         if tampo_idx is not None and tampo_idx < len(cells):
-            tampo = re.sub(r'<[^>]+>', '', cells[tampo_idx]).strip()
-            tampo = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', tampo)
-            version['tampo'] = html.unescape(tampo)
+            tampo = _cell_text(cells[tampo_idx], br_separator=" ")
+            version['tampo'] = tampo if tampo and tampo != '-' else None
         
         if wheel_idx is not None and wheel_idx < len(cells):
-            wheel = re.sub(r'<[^>]+>', '', cells[wheel_idx]).strip()
-            wheel = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', wheel)
-            version['wheel_type'] = html.unescape(wheel)
+            wheel = _cell_text(cells[wheel_idx], br_separator=" ")
+            version['wheel_type'] = wheel if wheel and wheel != '-' else None
         
         if base_idx is not None and base_idx < len(cells):
-            base = re.sub(r'<[^>]+>', '', cells[base_idx]).strip()
-            base = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', base)
-            version['base_color'] = html.unescape(base)
+            base = _cell_text(cells[base_idx], br_separator=" / ")
+            base_unescaped = base if base and base != '-' else None
+            
+            # Split "Base Color / Type" into base_color and base_material
+            # Format: "Black matte / Metal" or "ZAMAC" or "Black / Metal"
+            if base_unescaped:
+                # Try to split by "/" or "/" with spaces
+                base_parts = re.split(r'\s*/\s*', base_unescaped, maxsplit=1)
+                if len(base_parts) == 2:
+                    version['base_color'] = base_parts[0].strip() if base_parts[0].strip() else None
+                    version['base_material'] = base_parts[1].strip() if base_parts[1].strip() else None
+                else:
+                    # No "/" found - assume it's just base_color
+                    version['base_color'] = base_unescaped
+                    version['base_material'] = None
+            else:
+                version['base_color'] = None
+                version['base_material'] = None
         
         if window_idx is not None and window_idx < len(cells):
-            window = re.sub(r'<[^>]+>', '', cells[window_idx]).strip()
-            window = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', window)
-            version['window_color'] = html.unescape(window)
+            window = _cell_text(cells[window_idx], br_separator=" ")
+            version['window_color'] = window if window and window != '-' else None
         
         if interior_idx is not None and interior_idx < len(cells):
-            interior = re.sub(r'<[^>]+>', '', cells[interior_idx]).strip()
-            interior = re.sub(r'<a[^>]*>(.*?)</a>', r'\1', interior)
-            version['interior_color'] = html.unescape(interior)
+            interior = _cell_text(cells[interior_idx], br_separator=" ")
+            version['interior_color'] = interior if interior and interior != '-' else None
+        
+        if col_idx is not None and col_idx < len(cells):
+            col_num = _cell_text(cells[col_idx], br_separator=" ")
+            version['collector_number'] = col_num if col_num and col_num != '-' else None
+        
+        if country_idx is not None and country_idx < len(cells):
+            country = _cell_text(cells[country_idx], br_separator=" ")
+            version['country'] = country if country and country != '-' else None
+        
+        if notes_idx is not None and notes_idx < len(cells):
+            notes = _cell_text(cells[notes_idx], br_separator=" / ")
+            version['notes'] = notes if notes and notes != '-' else None
+            
+            # Extract base_code from notes if present (format: "Base code(s): K29, K30" or "Base code(s): F13, F14, F15")
+            if notes:
+                # Try "Base code(s):" pattern first
+                base_code_match = re.search(r'[Bb]ase\s+code[s]?\(?s\)?[:\s]+([A-Z0-9-]+(?:\s*,\s*[A-Z0-9-]+)*)', notes, re.IGNORECASE)
+                if not base_code_match:
+                    # Try "Production code(s):" pattern
+                    base_code_match = re.search(r'[Pp]roduction\s+code[s]?\(?s\)?[:\s]+([A-Z0-9-]+(?:\s*,\s*[A-Z0-9-]+)*)', notes, re.IGNORECASE)
+                
+                if base_code_match:
+                    base_codes = base_code_match.group(1).strip()
+                    # Clean up: remove extra spaces, keep commas
+                    base_codes = re.sub(r'\s+', ' ', base_codes)
+                    version['base_code'] = base_codes if base_codes else None
+                else:
+                    version['base_code'] = None
+            else:
+                version['base_code'] = None
+        
+        if photo_idx is not None and photo_idx < len(cells):
+            photo = _cell_text(cells[photo_idx], br_separator=" ")
+            # Extract image URL if present
+            img_match = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', cells[photo_idx], re.IGNORECASE)
+            if img_match:
+                version['photo'] = html.unescape(img_match.group(1))
+            else:
+                # Try to extract link
+                link_match = re.search(r'<a[^>]+href=["\']([^"\']+)["\']', cells[photo_idx], re.IGNORECASE)
+                if link_match:
+                    version['photo'] = html.unescape(link_match.group(1))
+                else:
+                    version['photo'] = html.unescape(photo) if photo and photo != '-' else None
         
         if version:
             versions.append(version)
@@ -511,6 +663,8 @@ def normalize_model_data(infobox_data: Dict[str, Any], page_title: str) -> Dict[
         "collector_number": None,
         "series_name": None,
         "series_number": None,
+        "series_position": None,
+        "series_total": None,
         "sub_series": None,
         "body_color": None,
         "tampo": None,
@@ -522,6 +676,10 @@ def normalize_model_data(infobox_data: Dict[str, Any], page_title: str) -> Dict[
         "treasure_hunt": False,
         "super_treasure_hunt": False,
         "exclusive": None,
+        "country": None,
+        "notes": None,
+        "base_code": None,
+        "description": None,
         "raw_infobox": infobox_data
     }
     
@@ -677,10 +835,17 @@ def download_all_models():
         page_data = get_page_content(page_title)
         
         if page_data:
+            actual_title = page_data.get("title")
+            if actual_title and actual_title != page_title:
+                page_title = actual_title
+
             wikitext = page_data.get("wikitext", {}).get("*", "")
             html_text = page_data.get("text", {}).get("*", "")
             
             infobox_data = extract_infobox_data(wikitext, html_text)
+            
+            # Extract description from page text
+            description = extract_description(html_text)
             
             # Extract versions/variants from the Versions table
             versions = extract_versions_table(html_text)
@@ -688,6 +853,8 @@ def download_all_models():
             if versions:
                 # Create a separate model entry for each version
                 base_model = normalize_model_data(infobox_data, page_title)
+                if description:
+                    base_model['description'] = description
                 
                 for version in versions:
                     # Create a model entry for this version
@@ -696,12 +863,19 @@ def download_all_models():
                     version_model['toy_number'] = version.get('toy_number')
                     version_model['release_year'] = version.get('year') or version_model.get('release_year')
                     version_model['series_name'] = version.get('series') or version_model.get('series_name')
+                    version_model['series_position'] = version.get('series_position')
+                    version_model['series_total'] = version.get('series_total')
                     version_model['body_color'] = version.get('body_color') or version_model.get('body_color')
                     version_model['tampo'] = version.get('tampo') or version_model.get('tampo')
                     version_model['wheel_type'] = version.get('wheel_type') or version_model.get('wheel_type')
                     version_model['base_color'] = version.get('base_color') or version_model.get('base_color')
+                    version_model['base_material'] = version.get('base_material') or version_model.get('base_material')
                     version_model['window_color'] = version.get('window_color') or version_model.get('window_color')
                     version_model['interior_color'] = version.get('interior_color') or version_model.get('interior_color')
+                    version_model['collector_number'] = version.get('collector_number') or version_model.get('collector_number')
+                    version_model['country'] = version.get('country')
+                    version_model['notes'] = version.get('notes')
+                    version_model['base_code'] = version.get('base_code')
                     
                     # Add version info to raw_infobox
                     if 'versions' not in version_model['raw_infobox']:
@@ -713,11 +887,15 @@ def download_all_models():
             elif infobox_data:
                 # No versions table, but has infobox - use single model
                 model = normalize_model_data(infobox_data, page_title)
+                if description:
+                    model['description'] = description
                 models.append(model)
                 processed += 1
             else:
                 # Even if no infobox, save basic info
                 model = normalize_model_data({}, page_title)
+                if description:
+                    model['description'] = description
                 models.append(model)
                 errors += 1
         else:

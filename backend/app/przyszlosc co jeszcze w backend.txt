@@ -1,0 +1,8 @@
+System Użytkowników: Obecnie kolekcja jest "globalna".
+ Kolejnym krokiem będzie dodanie tabeli User i logowania (OAuth/JWT), aby każdy miał swoją prywatną kolekcję.
+
+Statystyki: Moduł obliczający wartość kolekcji lub pokazujący rzadkość posiadanych modeli
+(np. ile masz modeli typu Treasure Hunt).
+
+Wyszukiwarka: Zaawansowane filtrowanie autek po kolorze,
+roku czy typie kół bezpośrednio w bazie danych.
