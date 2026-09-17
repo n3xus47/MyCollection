@@ -14,7 +14,7 @@ import uuid
 from collections import defaultdict
 
 # Ścieżka do pliku JSON
-JSON_FILE = Path(__file__).parent.parent / "database" / "hotwheels_models_new.json"
+JSON_FILE = Path(__file__).parent.parent / "database" / "hotwheels_models_new2.json"
 
 def load_json_data():
     """Wczytaj dane z pliku JSON."""
